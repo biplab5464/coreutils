@@ -265,6 +265,43 @@ where
     Ok(())
 }
 
+fn cksum_check(algoname: &str,files: I) -> UResult<()>
+where
+    I: Iterator<Item = &'a OsStr>,
+{
+    let files: Vec<_> = files.collect();
+    for filename in files{
+        let filename = Path::new(filename);
+        let stdin_buf;
+        let file_buf;
+        let not_file = filename == OsStr::new("-");
+        let mut file = BufReader::new(if not_file {
+            stdin_buf = stdin();
+            Box::new(stdin_buf) as Box<dyn Read>
+        } else if filename.is_dir() {
+            Box::new(BufReader::new(io::empty())) as Box<dyn Read>
+        } else {
+            file_buf = match File::open(filename) {
+                Ok(file) => file,
+                Err(err) => {
+                    show!(err.map_err_context(|| filename.to_string_lossy().to_string()));
+                    continue;
+                }
+            };
+            Box::new(file_buf) as Box<dyn Read>
+        });
+        if filename.is_dir() {
+            show!(USimpleError::new(
+                1,
+                format!("{}: Is a directory", filename.display())
+            ));
+            continue;
+        }
+        
+    }
+    Ok(())
+}
+
 fn digest_read<T: Read>(
     digest: &mut Box<dyn Digest>,
     reader: &mut BufReader<T>,
@@ -306,81 +343,100 @@ mod options {
     pub const LENGTH: &str = "length";
     pub const RAW: &str = "raw";
     pub const BASE64: &str = "base64";
+    pub const CHECK: &str = "check";
 }
 
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let matches = uu_app().try_get_matches_from(args)?;
 
-    let algo_name: &str = match matches.get_one::<String>(options::ALGORITHM) {
-        Some(v) => v,
-        None => ALGORITHM_OPTIONS_CRC,
-    };
+    if matches.get_flag(options::CHECK) {
+        let algo_name: &str = match matches.get_one::<String>(options::ALGORITHM) {
+            Some(v) if v == ALGORITHM_OPTIONS_BSD || v == ALGORITHM_OPTIONS_SYSV || v == ALGORITHM_OPTIONS_CRC => {
+                return Err(Box::new(USimpleError{
+                    message: "--check is not supported with --algorithm={bsd,sysv,crc}".to_string(),
+                    code : 1
+                }));
+            }, 
+            Some(v) => v,
+            None => "check",
+        };
+        let file = matches.get_many::<String>(options::FILE);
+        match matches.get_many::<String>(options::FILE) {
+            Some(files) => cksum_check(algo_name, files.map(OsStr::new))?,
+            None => cksum_check(algo_name, iter::once(OsStr::new("-")))?,
+        };    
+    } else {
+        let algo_name: &str = match matches.get_one::<String>(options::ALGORITHM) {
+            Some(v) => v,
+            None => ALGORITHM_OPTIONS_CRC,
+        };
 
-    let input_length = matches.get_one::<usize>(options::LENGTH);
-    let length = if let Some(length) = input_length {
-        match length.to_owned() {
-            0 => None,
-            n if n % 8 != 0 => {
-                // GNU's implementation seem to use these quotation marks
-                // in their error messages, so we do the same.
-                uucore::show_error!("invalid length: \u{2018}{length}\u{2019}");
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "length is not a multiple of 8",
-                )
-                .into());
-            }
-            n if n > 512 => {
-                uucore::show_error!("invalid length: \u{2018}{length}\u{2019}");
-
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "maximum digest length for \u{2018}BLAKE2b\u{2019} is 512 bits",
-                )
-                .into());
-            }
-            n => {
-                if algo_name != ALGORITHM_OPTIONS_BLAKE2B {
+        let input_length = matches.get_one::<usize>(options::LENGTH);
+        let length = if let Some(length) = input_length {
+            match length.to_owned() {
+                0 => None,
+                n if n % 8 != 0 => {
+                    // GNU's implementation seem to use these quotation marks
+                    // in their error messages, so we do the same.
+                    uucore::show_error!("invalid length: \u{2018}{length}\u{2019}");
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "--length is only supported with --algorithm=blake2b",
+                        "length is not a multiple of 8",
                     )
                     .into());
                 }
+                n if n > 512 => {
+                    uucore::show_error!("invalid length: \u{2018}{length}\u{2019}");
 
-                // Divide by 8, as our blake2b implementation expects bytes
-                // instead of bits.
-                Some(n / 8)
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "maximum digest length for \u{2018}BLAKE2b\u{2019} is 512 bits",
+                    )
+                    .into());
+                }
+                n => {
+                    if algo_name != ALGORITHM_OPTIONS_BLAKE2B {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "--length is only supported with --algorithm=blake2b",
+                        )
+                        .into());
+                    }
+
+                    // Divide by 8, as our blake2b implementation expects bytes
+                    // instead of bits.
+                    Some(n / 8)
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
-    let (name, algo, bits) = detect_algo(algo_name, length);
+        let (name, algo, bits) = detect_algo(algo_name, length);
 
-    let output_format = if matches.get_flag(options::RAW) {
-        OutputFormat::Raw
-    } else if matches.get_flag(options::BASE64) {
-        OutputFormat::Base64
-    } else {
-        OutputFormat::Hexadecimal
-    };
+        let output_format = if matches.get_flag(options::RAW) {
+            OutputFormat::Raw
+        } else if matches.get_flag(options::BASE64) {
+            OutputFormat::Base64
+        } else {
+            OutputFormat::Hexadecimal
+        };
 
-    let opts = Options {
-        algo_name: name,
-        digest: algo,
-        output_bits: bits,
-        length,
-        untagged: matches.get_flag(options::UNTAGGED),
-        output_format,
-    };
+        let opts: Options = Options {
+            algo_name: name,
+            digest: algo,
+            output_bits: bits,
+            length,
+            untagged: matches.get_flag(options::UNTAGGED),
+            output_format,
+        };
 
-    match matches.get_many::<String>(options::FILE) {
-        Some(files) => cksum(opts, files.map(OsStr::new))?,
-        None => cksum(opts, iter::once(OsStr::new("-")))?,
-    };
+        match matches.get_many::<String>(options::FILE) {
+            Some(files) => cksum(opts, files.map(OsStr::new))?,
+            None => cksum(opts, iter::once(OsStr::new("-")))?,
+        };
+    }
 
     Ok(())
 }
@@ -457,6 +513,13 @@ pub fn uu_app() -> Command {
                 // Even though this could easily just override an earlier '--raw',
                 // GNU cksum does not permit these flags to be combined:
                 .conflicts_with(options::RAW),
+        )
+        .arg(
+            Arg::new(options::CHECK)
+                .long(options::CHECK)
+                .short('c')
+                .help("read checksums from the FILEs and check them")
+                .action(ArgAction::SetTrue),
         )
         .after_help(AFTER_HELP)
 }
