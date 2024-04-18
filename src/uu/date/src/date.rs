@@ -45,6 +45,7 @@ const OPT_SET: &str = "set";
 const OPT_REFERENCE: &str = "reference";
 const OPT_UNIVERSAL: &str = "universal";
 const OPT_UNIVERSAL_2: &str = "utc";
+const OPT_RESOLUTION:  &str = "resolution";
 
 // Help strings
 
@@ -384,6 +385,13 @@ pub fn uu_app() -> Command {
                 .alias(OPT_UNIVERSAL_2)
                 .help("print or set Coordinated Universal Time (UTC)")
                 .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new(OPT_RESOLUTION)
+            .long(OPT_RESOLUTION)
+            .help("output the available resolution of timestamps")
+            .action(ArgAction::SetTrue)
+            .overrides_with(OPT_RESOLUTION),
         )
         .arg(Arg::new(OPT_FORMAT))
 }
